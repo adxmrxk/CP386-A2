@@ -18,13 +18,11 @@
 
 #define ASSIGNMENTS_PER_CHAPTER 2
 
-/* One TA's result, sent through a pipe */
 typedef struct {
-    int assignment;   /* 1-based assignment number */
+    int assignment;   
     double average;
 } Result;
 
-/* Used in every process. _exit skips stdio cleanup, which is safe in forked children. */
 static void die(const char *msg) {
     perror(msg);
     _exit(EXIT_FAILURE);
@@ -60,47 +58,43 @@ static void read_exact(int fd, void *buf, size_t len) {
     }
 }
 
-/*
- * Reads the grades file into a dynamically allocated 2-D array.
- * The number of columns comes from the first line, and the number of rows
- * is however many complete rows follow.
- */
-static int **read_grades(const char *filename, int *rows, int *cols) {
+static int assignments_in_chapter(int cols, int chapter) {
+    int left = cols - chapter * ASSIGNMENTS_PER_CHAPTER;
+    return left < ASSIGNMENTS_PER_CHAPTER ? left : ASSIGNMENTS_PER_CHAPTER;
+}
+
+
+static double **read_grades(const char *filename, int *rows, int *cols) {
     FILE *fp = fopen(filename, "r");
     if (fp == NULL) {
-        perror(filename);
+        printf("Failed to access grades file '%s': %s\n", filename, strerror(errno));
         return NULL;
     }
 
     char line[4096];
-    if (fgets(line, sizeof line, fp) == NULL) {
-        fprintf(stderr, "%s is empty\n", filename);
-        fclose(fp);
-        return NULL;
-    }
-
     *cols = 0;
-    for (char *tok = strtok(line, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n"))
-        (*cols)++;
+    while (*cols == 0 && fgets(line, sizeof line, fp) != NULL) {
+        for (char *tok = strtok(line, " \t\r\n"); tok != NULL; tok = strtok(NULL, " \t\r\n"))
+            (*cols)++;
+    }
     rewind(fp);
 
-    if (*cols == 0 || *cols % ASSIGNMENTS_PER_CHAPTER != 0) {
-        fprintf(stderr, "Expected a multiple of %d columns, found %d\n",
-                ASSIGNMENTS_PER_CHAPTER, *cols);
+    if (*cols == 0) {
+        printf("Error: grades file '%s' is empty\n", filename);
         fclose(fp);
         return NULL;
     }
 
-    int **grades = NULL;
+    double **grades = NULL;
     int count = 0;
     int capacity = 0;
     for (;;) {
-        int *row = malloc(*cols * sizeof *row);
+        double *row = malloc(*cols * sizeof *row);
         if (row == NULL) die("malloc");
 
         int j;
         for (j = 0; j < *cols; j++) {
-            if (fscanf(fp, "%d", &row[j]) != 1) break;
+            if (fscanf(fp, "%lf", &row[j]) != 1) break;
         }
         if (j < *cols) {   /* end of file, or an incomplete row */
             free(row);
@@ -109,7 +103,7 @@ static int **read_grades(const char *filename, int *rows, int *cols) {
 
         if (count == capacity) {
             capacity = capacity ? capacity * 2 : 16;
-            int **bigger = realloc(grades, capacity * sizeof *bigger);
+            double **bigger = realloc(grades, capacity * sizeof *bigger);
             if (bigger == NULL) die("realloc");
             grades = bigger;
         }
@@ -121,8 +115,7 @@ static int **read_grades(const char *filename, int *rows, int *cols) {
     return grades;
 }
 
-/* TA: averages one assignment column and sends the result to its GradTA */
-static void ta_process(int column, int **grades, int rows, int out_fd) {
+static void ta_process(int column, double **grades, int rows, int out_fd) {
     double sum = 0;
     for (int i = 0; i < rows; i++)
         sum += grades[i][column];
@@ -133,12 +126,11 @@ static void ta_process(int column, int **grades, int rows, int out_fd) {
     _exit(EXIT_SUCCESS);
 }
 
-/* GradTA: owns one chapter and creates one TA per assignment in it */
-static void gradta_process(int chapter, int **grades, int rows, int out_fd) {
+static void gradta_process(int chapter, int assignments, double **grades, int rows, int out_fd) {
     int pipes[ASSIGNMENTS_PER_CHAPTER][2];
     pid_t pids[ASSIGNMENTS_PER_CHAPTER];
 
-    for (int k = 0; k < ASSIGNMENTS_PER_CHAPTER; k++) {
+    for (int k = 0; k < assignments; k++) {
         if (pipe(pipes[k]) == -1) die("pipe");
 
         pids[k] = fork();
@@ -151,8 +143,7 @@ static void gradta_process(int chapter, int **grades, int rows, int out_fd) {
         close(pipes[k][1]);
     }
 
-    /* Pass each TA's result up to the Teacher */
-    for (int k = 0; k < ASSIGNMENTS_PER_CHAPTER; k++) {
+    for (int k = 0; k < assignments; k++) {
         Result r;
         read_exact(pipes[k][0], &r, sizeof r);
         close(pipes[k][0]);
@@ -166,19 +157,21 @@ static void gradta_process(int chapter, int **grades, int rows, int out_fd) {
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s <grades file>\n", argv[0]);
+        printf("Usage: ./assignment_average [sample_in_grades.txt]\n");
         return EXIT_FAILURE;
     }
 
     int rows, cols;
-    int **grades = read_grades(argv[1], &rows, &cols);
-    if (grades == NULL || rows == 0) {
-        fprintf(stderr, "No grades were read from %s\n", argv[1]);
-        return EXIT_FAILURE;
+    double **grades = read_grades(argv[1], &rows, &cols);
+    if (grades == NULL) {
+        return EXIT_SUCCESS;
+    }
+    if (rows == 0) {
+        printf("Error: no grade rows were found in '%s'\n", argv[1]);
+        return EXIT_SUCCESS;
     }
 
-    /* The number of chapters comes from the number of columns, so the program adapts to the file */
-    int chapters = cols / ASSIGNMENTS_PER_CHAPTER;
+    int chapters = (cols + ASSIGNMENTS_PER_CHAPTER - 1) / ASSIGNMENTS_PER_CHAPTER;
     int (*pipes)[2] = malloc(chapters * sizeof *pipes);
     pid_t *pids = malloc(chapters * sizeof *pids);
     if (pipes == NULL || pids == NULL) die("malloc");
@@ -192,14 +185,14 @@ int main(int argc, char *argv[]) {
 
         if (pids[c] == 0) {
             close(pipes[c][0]);
-            gradta_process(c, grades, rows, pipes[c][1]);
+            gradta_process(c, assignments_in_chapter(cols, c), grades, rows, pipes[c][1]);
         }
         close(pipes[c][1]);
     }
 
-    /* Read chapter by chapter so the output is in assignment order */
     for (int c = 0; c < chapters; c++) {
-        for (int k = 0; k < ASSIGNMENTS_PER_CHAPTER; k++) {
+        int assignments = assignments_in_chapter(cols, c);
+        for (int k = 0; k < assignments; k++) {
             Result r;
             read_exact(pipes[c][0], &r, sizeof r);
             printf("Assignment %d - Average = %f\n", r.assignment, r.average);
