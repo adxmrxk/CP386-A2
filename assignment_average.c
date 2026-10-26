@@ -1,12 +1,7 @@
-/*
- * CP386 Assignment 2 - Question 1
- *
- * Process tree:
- *   Teacher -> GradTA (one per chapter) -> TA (one per assignment)
- *
- * Each TA averages one assignment column and sends the result back up the
- * tree through pipes. The Teacher prints the results in assignment order.
- */
+//AdamRak
+//WilfridLaurierUniversity
+//210700280
+//rakx0280@mylaurier.ca
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -116,9 +111,9 @@ static double **read_grades(const char *filename, int *rows, int *cols) {
 }
 
 static void ta_process(int column, double **grades, int rows, int out_fd) {
-    double sum = 0;
+    double sum_1 = 0;
     for (int i = 0; i < rows; i++)
-        sum += grades[i][column];
+        sum_1 += grades[i][column];
 
     Result r = { column + 1, sum / rows };
     write_all(out_fd, &r, sizeof r);
