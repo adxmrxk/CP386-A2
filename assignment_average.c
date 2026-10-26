@@ -115,7 +115,7 @@ static void ta_process(int column, double **grades, int rows, int out_fd) {
     for (int i = 0; i < rows; i++)
         sum_1 += grades[i][column];
 
-    Result r = { column + 1, sum / rows };
+    Result r = { column + 1, sum_1 / rows };
     write_all(out_fd, &r, sizeof r);
     close(out_fd);
     _exit(EXIT_SUCCESS);
